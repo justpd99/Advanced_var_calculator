@@ -222,7 +222,7 @@ with st.sidebar:
     linkedin_url = "https://www.linkedin.com/in/desai-prathmesh/"
     st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: none; color: inherit;"><img src="https://cdn-icons-png.flaticon.com/512/174/174857.png" width="25" height="25" style="vertical-align: middle; margin-right: 10px;">`Prathmesh Desai`</a>', unsafe_allow_html=True)
 
-    tickers_input = st.text_input('Enter tickers separated by space', 'AAPL MSFT GOOG')
+    tickers_input = st.text_input('Enter tickers separated by space', 'NVDA MSFT PG')
     tickers = tickers_input.split()
     
     # Portfolio Rebalancing Section
