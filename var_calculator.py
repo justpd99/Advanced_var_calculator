@@ -9,7 +9,7 @@ import datetime
 
 # Page Configuration
 st.set_page_config(
-    page_title="VaR Calculator",
+    page_title="Advanced VaR Calculator",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded")
@@ -43,9 +43,6 @@ class VaR:
         self.parametric_var = None
         self.component_vars = None
         self.var_contributions = None
-        self.optimal_weights = None
-        self.optimal_var = None
-        self.var_reduction = None
         
         # Use provided weights or default to equal weights
         if weights is None:
@@ -60,7 +57,6 @@ class VaR:
             self.parametric_method()
             if len(self.ticker) > 1:
                 self.calculate_component_var()
-                self.find_optimal_hedge()
         
     def data(self):
         # Use cached function to fetch data
@@ -134,109 +130,55 @@ class VaR:
             self.parametric_var = 0
     
     def calculate_component_var(self):
-        """Calculate component VaR and contribution percentages"""
+        """Calculate component VaR and contribution percentages based on Professor Fusai's methodology"""
         try:
-            # Component VaR calculation
-            self.component_vars = {}
-            self.var_contributions = {}
-            
-            if len(self.ticker) > 1 and self.parametric_var > 0:  # Only calculate for multi-asset portfolios
-                # Calculate portfolio variance
-                portfolio_var = self.portfolio_returns.var()
+            # Ensure multiple assets and valid parametric VaR
+            if len(self.ticker) > 1 and self.parametric_var > 0:
+                # Portfolio variance
+                portfolio_variance = np.dot(self.weights.T, np.dot(self.cov_matrix, self.weights))
+                portfolio_volatility = np.sqrt(portfolio_variance)
                 
+                # Initialize containers for results
+                self.component_vars = {}
+                self.var_contributions = {}
+                
+                # For each asset, calculate its component VaR
                 for i, ticker in enumerate(self.ticker):
-                    # Calculate covariance with portfolio
-                    asset_returns = self.log_returns_df[ticker]
-                    covariance_with_portfolio = np.cov(asset_returns, self.portfolio_returns)[0, 1]
+                    # Calculate covariance between asset and portfolio
+                    # We need to ensure we're accessing the DataFrame correctly
+                    cov_with_portfolio = 0
+                    for j, other_ticker in enumerate(self.ticker):
+                        # Access covariance matrix by ticker names, not by indices
+                        cov_with_portfolio += self.weights[j] * self.cov_matrix.loc[ticker, other_ticker]
                     
-                    # Marginal VaR is the partial derivative of VaR with respect to weight
-                    marginal_var = covariance_with_portfolio / np.sqrt(portfolio_var) * norm.ppf(self.conf_level) * self.portf_val
+                    # Marginal VaR calculation
+                    z_value = norm.ppf(self.conf_level)
+                    marginal_var = z_value * (cov_with_portfolio / portfolio_volatility) * np.sqrt(self.rolling / 252)
                     
-                    # Component VaR = weight * marginal VaR
-                    component_var = self.weights[i] * marginal_var
+                    # Component VaR = weight * Marginal VaR
+                    component_var = self.weights[i] * marginal_var * self.portf_val
                     self.component_vars[ticker] = component_var
                     
-                    # Calculate contribution to VaR (as percentage)
+                    # Calculate contribution percentage
                     self.var_contributions[ticker] = (component_var / self.parametric_var) * 100
+            else:
+                # For a single asset, component VaR equals parametric VaR
+                if len(self.ticker) == 1:
+                    self.component_vars = {self.ticker[0]: self.parametric_var}
+                    self.var_contributions = {self.ticker[0]: 100.0}
+                else:
+                    # Fallback for invalid VaR
+                    self.component_vars = {ticker: 0 for ticker in self.ticker}
+                    self.var_contributions = {ticker: 0 for ticker in self.ticker}
+        
         except Exception as e:
             st.error(f"Error calculating component VaR: {e}")
+            import traceback
+            st.warning(traceback.format_exc())
+            
+            # Reset to zero values as fallback
             self.component_vars = {ticker: 0 for ticker in self.ticker}
             self.var_contributions = {ticker: 0 for ticker in self.ticker}
-            
-    def find_optimal_hedge(self):
-        """Find optimal weights to minimize VaR while maintaining similar expected return"""
-        try:
-            if len(self.ticker) <= 1 or self.parametric_var <= 0:
-                return
-                
-            # Import scipy optimize
-            from scipy.optimize import minimize
-            
-            # Calculate expected returns
-            expected_returns = self.log_returns_df.mean() * 252
-            current_portfolio_return = np.sum(expected_returns * self.weights)
-            
-            # Define the objective function to minimize (portfolio variance)
-            def portfolio_variance(weights):
-                weights = np.array(weights)
-                portfolio_var = np.dot(weights.T, np.dot(self.cov_matrix, weights))
-                return portfolio_var
-                
-            # Define constraint: weights sum to 1
-            def sum_constraint(weights):
-                return np.sum(weights) - 1
-                
-            # Define expected return constraint: maintain similar return
-            def return_constraint(weights):
-                weights = np.array(weights)
-                portfolio_return = np.sum(expected_returns * weights)
-                return portfolio_return - current_portfolio_return
-                
-            # Initial guess (current weights)
-            initial_weights = self.weights
-            
-            # Constraints
-            constraints = [
-                {'type': 'eq', 'fun': sum_constraint},  # weights sum to 1
-                {'type': 'eq', 'fun': return_constraint}  # maintain same expected return
-            ]
-            
-            # Bounds for weights (between 0 and 1, i.e., long-only)
-            bounds = tuple((0, 1) for _ in range(len(self.ticker)))
-            
-            # Run optimization
-            result = minimize(
-                portfolio_variance,
-                initial_weights,
-                method='SLSQP',
-                bounds=bounds,
-                constraints=constraints,
-                options={'disp': False, 'maxiter': 1000}
-            )
-            
-            if result.success:
-                # Store optimized weights
-                self.optimal_weights = result.x
-                
-                # Calculate new VaR with optimal weights
-                optimal_portfolio_std = np.sqrt(portfolio_variance(self.optimal_weights))
-                self.optimal_var = optimal_portfolio_std * norm.ppf(self.conf_level) * np.sqrt(self.rolling / 252) * self.portf_val
-                
-                # Calculate VaR reduction percentage
-                self.var_reduction = ((self.parametric_var - self.optimal_var) / self.parametric_var) * 100
-            else:
-                st.warning("Could not find optimal hedge weights. Using original weights.")
-                self.optimal_weights = self.weights
-                self.optimal_var = self.parametric_var
-                self.var_reduction = 0
-                
-        except Exception as e:
-            st.error(f"Error calculating optimal hedge: {e}")
-            import traceback
-            st.error(traceback.format_exc())
-            self.optimal_weights = self.weights
-            self.optimal_var = self.parametric_var
-            self.var_reduction = 0
 
     def plot_var_results(self, title, var_value, returns_dollar, conf_level):
         try:
@@ -424,60 +366,12 @@ def calculate_and_display_var(tickers, start_date, end_date, rolling_window, con
             
             st.pyplot(fig)
             
-            # Optimal Hedge Section
-            if hasattr(var_instance, 'optimal_weights') and var_instance.optimal_weights is not None:
-                st.info("Optimal Hedge Analysis")
-                
-                # Display optimal weights
-                optimal_weights_data = {
-                    "Asset": tickers,
-                    "Current Weight": [f"{w*100:.1f}%" for w in var_instance.weights],
-                    "Optimal Weight": [f"{w*100:.1f}%" for w in var_instance.optimal_weights],
-                    "Weight Change": [f"{(o-c)*100:+.1f}%" for o, c in zip(var_instance.optimal_weights, var_instance.weights)]
-                }
-                
-                optimal_df = pd.DataFrame(optimal_weights_data)
-                st.table(optimal_df)
-                
-                # Show VaR reduction
-                var_reduction_cols = st.columns(3)
-                with var_reduction_cols[0]:
-                    st.metric("Current Parametric VaR", f"${var_instance.parametric_var:,.2f}")
-                with var_reduction_cols[1]:
-                    st.metric("Optimal Hedge VaR", f"${var_instance.optimal_var:,.2f}")
-                with var_reduction_cols[2]:
-                    st.metric("VaR Reduction", f"{var_instance.var_reduction:.2f}%")
-                
-                # Create comparison chart
-                fig, ax = plt.subplots(figsize=(10, 6))
-                
-                # Set width of bars
-                bar_width = 0.35
-                
-                # Set positions of bars on X axis
-                r1 = np.arange(len(tickers))
-                r2 = [x + bar_width for x in r1]
-                
-                # Create bars
-                current_bars = ax.bar(r1, var_instance.weights * 100, width=bar_width, label='Current Weights (%)')
-                optimal_bars = ax.bar(r2, var_instance.optimal_weights * 100, width=bar_width, label='Optimal Weights (%)')
-                
-                # Add labels and title
-                ax.set_xlabel('Assets')
-                ax.set_ylabel('Weight (%)')
-                ax.set_title('Current vs. Optimal Portfolio Weights')
-                ax.set_xticks([r + bar_width/2 for r in range(len(tickers))])
-                ax.set_xticklabels(tickers)
-                ax.legend()
-                
-                # Add value labels on top of bars
-                for bars, weights in [(current_bars, var_instance.weights), (optimal_bars, var_instance.optimal_weights)]:
-                    for i, bar in enumerate(bars):
-                        height = bar.get_height()
-                        ax.text(bar.get_x() + bar.get_width()/2., height + 0.5,
-                                f'{weights[i]*100:.1f}%', ha='center', va='bottom')
-                
-                st.pyplot(fig)
+            # Verify Component VaR sum equals Parametric VaR
+            total_component_var = sum(var_instance.component_vars.values())
+            st.write(f"Sum of Component VaRs: ${total_component_var:,.2f}")
+            st.write(f"Parametric VaR: ${var_instance.parametric_var:,.2f}")
+            st.write(f"Difference: ${total_component_var - var_instance.parametric_var:,.2f}")
+            st.write(f"Sum of Contributions: {sum(var_instance.var_contributions.values()):.2f}%")
         
         # Calculate stress scenario VaR if requested
         if scenario and scenario != "None":
